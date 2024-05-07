@@ -81,8 +81,8 @@ class Mediator:
         response_type: type[T] = message.__mediator_response_type__
         (callback,) = self._callbacks[message.__class__]
         response = await asyncio.wait_for(callback(message), timeout)
-        if not isinstance(response, response_type):
-            raise BadResponseError(message, response, response_type)
+        # if not isinstance(response, response_type):
+        #     raise BadResponseError(message, response, response_type)
         return response
 
     async def _multi_response_request(self, message: MultiResponseRequest[T], timeout: float | None) -> AsyncIterable[T]:
@@ -92,8 +92,8 @@ class Mediator:
             response = await coro
             if response is None:
                 continue
-            if not isinstance(response, response_type):
-                raise BadResponseError(message, response, response_type)
+            # if not isinstance(response, response_type):
+            #     raise BadResponseError(message, response, response_type)
             yield response
 
     @overload
