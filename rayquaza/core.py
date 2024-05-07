@@ -78,6 +78,9 @@ class Mediator:
         return bool(self._callbacks[message_type])
 
     async def _single_response_request(self, message: SingleResponseRequest[T], timeout: float | None) -> T:
+        if not await self.has_subscriptions(message.__class__):
+            raise RuntimeError(f"Request of type {message.__class__} has no active subscriptions.")
+
         response_type: type[T] = message.__mediator_response_type__
         (callback,) = self._callbacks[message.__class__]
         response = await asyncio.wait_for(callback(message), timeout)
@@ -156,8 +159,6 @@ class Mediator:
             raise UnqualifiedRequestTypeException(message)
 
         if message.__mediator_request_type__ is RequestType.single:
-            if not self.has_subscriptions(message.__class__):
-                raise RuntimeError(f"Request of type {message.__class__} has no active subscriptions.")
             return self._single_response_request(message, timeout)
 
         return self._multi_response_request(message, timeout)
@@ -218,7 +219,7 @@ class Mediator:
 
         self._callbacks[message_type].add(callback)  # type: ignore  # I'm not sure why this is an error
 
-    async def unsubscribe(
+    def unsubscribe(
         self, message_type: type[Message], callback: Callable[[Message], Coroutine[Any, Any, Any]]
     ) -> None:
         """Unregisters a subscription for a message type.
