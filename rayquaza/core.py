@@ -23,15 +23,19 @@ class Mediator:
     """The mediator class that handles message passing between components."""
 
     def __init__(self) -> None:
-        self._callbacks: dict[type[Message], set[Callable[[Message], Coroutine[Any, Any, Any]]]] = defaultdict(set)
+        self._callbacks: dict[tuple[str, type[Message]], set[Callable[[Message], Coroutine[Any, Any, Any]]]] = defaultdict(
+            set
+        )
 
-    async def publish(self, message: Message, /, *, wait: bool = True, timeout: float | None = None) -> None:
+    async def publish(self, channel: str, message: Message, /, *, wait: bool = True, timeout: float | None = None) -> None:
         """|coro|
 
         Publishes a message to the mediator.
 
         Parameters
         ----------
+        channel: :class:`str`
+            The channel to publish the message on.
         message: :class:`Message`
             The message to publish.
         wait: :class:`bool`
@@ -56,17 +60,19 @@ class Mediator:
             raise MessagePublishedException(message)
 
         if wait:
-            coros = (callback(message) for callback in self._callbacks[message.__class__])
+            coros = (callback(message) for callback in self._callbacks[channel, message.__class__])
             await asyncio.wait_for(asyncio.gather(*(coros)), timeout)
         else:
-            for callback in self._callbacks[message.__class__]:
+            for callback in self._callbacks[channel, message.__class__]:
                 asyncio.create_task(callback(message))
 
-    async def has_subscriptions(self, message_type: type[Message]) -> bool:
+    async def has_subscriptions(self, channel: str, message_type: type[Message]) -> bool:
         """Checks if the mediator has any subscriptions for a message type.
 
         Parameters
         ----------
+        channel: :class:`str`
+            The channel to check for subscriptions on.
         message_type: type[:class:`Message`]
             The type of message to check for subscriptions.
 
@@ -75,37 +81,43 @@ class Mediator:
         :class:`bool`
             Whether the mediator has any subscriptions for the message type.
         """
-        return bool(self._callbacks[message_type])
+        return bool(self._callbacks[channel, message_type])
 
-    async def _single_response_request(self, message: SingleResponseRequest[T], timeout: float | None) -> T:
-        if not await self.has_subscriptions(message.__class__):
+    async def _single_response_request(self, channel: str, message: SingleResponseRequest[T], timeout: float | None) -> T:
+        if not await self.has_subscriptions(channel, message.__class__):
             raise RuntimeError(f"Request of type {message.__class__} has no active subscriptions.")
 
         response_type: type[T] = message.__mediator_response_type__
-        (callback,) = self._callbacks[message.__class__]
+        (callback,) = self._callbacks[channel, message.__class__]
         response = await asyncio.wait_for(callback(message), timeout)
-        # if not isinstance(response, response_type):
-        #     raise BadResponseError(message, response, response_type)
+        if not isinstance(response, response_type):
+            raise BadResponseError(message, response, response_type)
         return response
 
-    async def _multi_response_request(self, message: MultiResponseRequest[T], timeout: float | None) -> AsyncIterable[T]:
+    async def _multi_response_request(
+        self, channel: str, message: MultiResponseRequest[T], timeout: float | None
+    ) -> AsyncIterable[T]:
         response_type: type[T] = message.__mediator_response_type__
-        callbacks = self._callbacks[message.__class__]
+        callbacks = self._callbacks[channel, message.__class__]
         for coro in asyncio.as_completed([callback(message) for callback in callbacks], timeout=timeout):
             response = await coro
             if response is None:
                 continue
-            # if not isinstance(response, response_type):
-            #     raise BadResponseError(message, response, response_type)
+            if not isinstance(response, response_type):
+                raise BadResponseError(message, response, response_type)
             yield response
 
     @overload
-    def request(self, message: SingleResponseRequest[T], timeout: float | None = None) -> Coroutine[Any, Any, T]: ...
+    def request(
+        self, channel: str, message: SingleResponseRequest[T], timeout: float | None = None
+    ) -> Coroutine[Any, Any, T]: ...
 
     @overload
-    def request(self, message: MultiResponseRequest[T], timeout: float | None = None) -> AsyncIterable[T]: ...
+    def request(self, channel: str, message: MultiResponseRequest[T], timeout: float | None = None) -> AsyncIterable[T]: ...
 
-    def request(self, message: Request[T, Any], timeout: float | None = None) -> Coroutine[Any, Any, T] | AsyncIterable[T]:
+    def request(
+        self, channel: str, message: Request[T, Any], timeout: float | None = None
+    ) -> Coroutine[Any, Any, T] | AsyncIterable[T]:
         """|coro|
 
         Send a request to the mediator and return the response or responses.
@@ -159,13 +171,14 @@ class Mediator:
             raise UnqualifiedRequestTypeException(message)
 
         if message.__mediator_request_type__ is RequestType.single:
-            return self._single_response_request(message, timeout)
+            return self._single_response_request(channel, message, timeout)
 
-        return self._multi_response_request(message, timeout)
+        return self._multi_response_request(channel, message, timeout)
 
     @overload
     def create_subscription(
         self,
+        channel: str,
         message_type: type[MultiResponseRequest[T]],
         callback: Callable[[Message], Coroutine[Any, Any, T | None]],
     ) -> None: ...
@@ -173,6 +186,7 @@ class Mediator:
     @overload
     def create_subscription(
         self,
+        channel: str,
         message_type: type[Request[T, Any]],
         callback: Callable[[Message], Coroutine[Any, Any, T]],
     ) -> None: ...
@@ -180,12 +194,14 @@ class Mediator:
     @overload
     def create_subscription(
         self,
+        channel: str,
         message_type: type[T_MSG],
         callback: Callable[[T_MSG], Coroutine[Any, Any, Any]],
     ) -> None: ...
 
     def create_subscription(
         self,
+        channel: str,
         message_type: type[T_MSG],
         callback: Callable[[T_MSG], Coroutine[Any, Any, Any]],
     ) -> None:
@@ -193,9 +209,10 @@ class Mediator:
 
         Parameters
         ----------
+        channel: :class:`str`
+            The channel to subscribe to the message on.
         message_type: type[:class:`Message`]
             The type of message to subscribe to.
-
         callback: Callable[[:class:`Message`], Coroutine[Any, Any, Any]]
             The callback to execute when a message of the specified type is published.
             In the case of a request, the callback should return the appropriate response.
@@ -213,24 +230,26 @@ class Mediator:
         if (
             issubclass(message_type, Request)
             and message_type.__mediator_request_type__ is RequestType.single
-            and self._callbacks[message_type]
+            and self._callbacks[channel, message_type]
         ):
             raise RuntimeError("Request type already has a subscription")
 
-        self._callbacks[message_type].add(callback)  # type: ignore  # I'm not sure why this is an error
+        self._callbacks[channel, message_type].add(callback)  # type: ignore  # I'm not sure why this is an error
 
     def unsubscribe(
-        self, message_type: type[Message], callback: Callable[[Message], Coroutine[Any, Any, Any]]
+        self, channel: str, message_type: type[Message], callback: Callable[[Message], Coroutine[Any, Any, Any]]
     ) -> None:
         """Unregisters a subscription for a message type.
 
         Parameters
         ----------
+        channel: :class:`str`
+            The channel to unsubscribe from.
         message_type: type[:class:`Message`]
             The type of message to unsubscribe from.
         callback: Callable[[:class:`Message`],
             The callback to remove from the subscription.
         """
-        self._callbacks[message_type].remove(callback)
-        if not self._callbacks[message_type]:
-            del self._callbacks[message_type]
+        self._callbacks[channel, message_type].remove(callback)
+        if not self._callbacks[channel, message_type]:
+            del self._callbacks[channel, message_type]
